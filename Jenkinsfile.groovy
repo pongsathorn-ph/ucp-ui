@@ -1,35 +1,58 @@
-// METHODS FOR REPLACEMENT
 def replaceTemplate(String fileName, String outputPath, Map replacementMap) {
-  def content = readFile("${env.helmTemplateDir}/${fileName}")
+  def content = readFile("${env.HELM_TEMPLATE_DIR}/${fileName}")
   replacementMap.each { key, value -> content = content.replace(key, value) }
   writeFile file: outputPath, text: content
 }
 
-def replaceChart() {
-  replaceTemplate("Chart.yaml", "${env.helmChartDir}/Chart.yaml", ["{{CHART_VERSION}}": "${env.chartVersion}"])
+def getChartName() {
+  def yaml = readYaml file: "${env.HELM_TEMPLATE_DIR}/Chart.yaml"
+  def data = yaml.name
+  return data
 }
 
-def replaceValue() {
-  replaceTemplate("values.yaml", "${env.helmChartDir}/values/values-dev.yaml", ["{{IMAGE_REPO}}": "${env.imageRepoDev}"])
-  if (params.releaseTag) {
-    replaceTemplate("values.yaml", "${env.helmChartDir}/values/values-pre.yaml", ["{{IMAGE_REPO}}": "${env.imageRepoPre}"])
-    replaceTemplate("values.yaml", "${env.helmChartDir}/values/values-pro.yaml", ["{{IMAGE_REPO}}": "${env.imageRepoPro}"])
-  }
-}
-
-def replaceDeployment() {
-  if (params.releaseTag) {
-    replaceTemplate("deployment.yaml", "${env.helmChartDir}/templates/deployment.yaml", ["{{IMAGE_REPO}}": "{{.Values.image.repository}}"]).yaml
-  } else {
-    replaceTemplate("deployment.yaml", "${env.helmChartDir}/templates/deployment.yaml", ["{{IMAGE_REPO}}": "${env.imageRepoDev}"])
-  }
-}
-
-// METHODS FOR HELM
-def helmUpgrade() {
+def packageProcess() {
   sh """
-    sudo helm repo update ${env.chartRepoName}
-    sudo helm upgrade --install ucp-ui ${env.chartRepoName}/${env.chartName} --namespace ${params.namespace} --create-namespace --version ${env.chartVersion} --kubeconfig ${env.kubeConfigDir} --debug --atomic --timeout 2m0s
+    sudo mkdir -p ${env.HELM_CHART_DIR}/assets
+    sudo helm package ${env.HELM_CHART_DIR} -d ${env.HELM_CHART_DIR}/temp
+    sudo helm repo index --url assets --merge ${env.HELM_CHART_DIR}/index.yaml ${env.HELM_CHART_DIR}/temp
+
+    sudo mv ${env.HELM_CHART_DIR}/temp/${env.CHART_NAME}-*.tgz ${env.HELM_CHART_DIR}/assets
+    sudo mv ${env.HELM_CHART_DIR}/temp/index.yaml ${env.HELM_CHART_DIR}/
+    sudo rm -rf ${env.HELM_CHART_DIR}/temp
+  """
+}
+
+def gitCheckoutProcess(String tagName) {
+  cleanWs()
+  checkout([$class: 'GitSCM', branches: [[name: tagName]], extensions: [], userRemoteConfigs: [[credentialsId: env.GITHUB_CREDENTIAL_ID, url: "https://${env.GIT_REPO}"]]])
+}
+
+def gitCommitPushProcess() {
+  withCredentials([gitUsernamePassword(credentialsId: "${env.GITHUB_CREDENTIAL_ID}", gitToolName: 'Default')]) {
+    sh """
+      git config --global user.name 'Jenkins Pipeline'
+      git config --global user.email 'jenkins@localhost'
+      git checkout -b ${env.GIT_BRANCH_NAME}
+      git add .
+      git commit -m 'Update from Jenkins-Pipeline'
+      git push origin ${env.GIT_BRANCH_NAME}
+    """
+  }
+}
+
+def gitRemoveTagProcess(String tagName) {
+  catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+    sh """
+      git tag -d ${tagName}
+      git push --delete https://$GITHUB_CREDENTIAL_USR:$GITHUB_CREDENTIAL_PSW@${env.GIT_REPO} ${tagName}
+    """
+  }
+}
+
+def gitPushTagProcess(String tagName) {
+  sh """
+    git tag ${tagName}
+    git push https://$GITHUB_CREDENTIAL_USR:$GITHUB_CREDENTIAL_PSW@${env.GIT_REPO} ${tagName}
   """
 }
 
@@ -37,149 +60,319 @@ pipeline {
   agent any
 
   parameters {
-    // string(name: 'namespace', defaultValue: params.namespace, description: 'Please fill namespace.')
     string(name: 'chartVersion', defaultValue: params.chartVersion, description: 'Please fill version.')
-    choice(name: 'buildType', choices: ['alpha'], description: 'Please select build type.')
-    booleanParam(name: 'releaseTag', description: '')
+    choice(name: 'buildType', choices: ['ALPHA','RELEASE TAG'], description: 'Please select build type.')
   }
 
   environment {
-    currentDir = sh(script: 'sudo pwd', returnStdout: true).trim()
-    helmChartDir = "${env.currentDir}/helm-chart"
-    helmTemplateDir = "${env.currentDir}/helm-template"
-    kubeConfigDir = "/root/.kube/Config"
+    BUILD_NUMBER = String.format("%04d", currentBuild.number)
+    HELM_CHART_DIR = "${env.WORKSPACE}/helm-chart"
+    HELM_TEMPLATE_DIR = "${env.WORKSPACE}/helm-template"
 
-    gitCredentialId = "GITHUB-jenkins"
-    gitBranch = "main"
-    gitRepoUrl = "https://github.com/pongsathorn-ph/ucp-ui.git"
+    GITHUB_CREDENTIAL_ID = "GITHUB-jenkins"
+    GITHUB_CREDENTIAL = credentials("${GITHUB_CREDENTIAL_ID}")
 
-    chartRepoName = "demo-repo"
-    chartRepoUrl = "https://pongsathorn-ph.github.io/ucp-ui/helm-chart/"
-    chartName = "ucp-ui-chart"
-    currentBuild = String.format("%04d", currentBuild.number)
-    chartVersion = "${params.chartVersion}-${env.currentBuild}-${params.buildType}"
+    GIT_BRANCH_NAME = "main"
+    GIT_REPO = "github.com/pongsathorn-ph/ucp-ui.git"
 
-    imageRepoDev = "pongsathorn/demo-ui-dev"
-    imageRepoPre = "pongsathorn/demo-ui-pre"
-    imageRepoPro = "pongsathorn/demo-ui-pro"
+    CHART_NAME = "ucp-ui-chart"
+    CHART_VERSION = "${params.chartVersion}-${env.BUILD_NUMBER}-${params.buildType}"
+
+    IMAGE_REPO_PRE = "pongsathorn/demo-ui-pre"
+    IMAGE_REPO_ALPHA = "pongsathorn/demo-ui-dev"
+    IMAGE_REPO_PRO = "pongsathorn/demo-ui-pro"
+
+    TAG_NAME_PRE = "${params.chartVersion}-PRE-ALPHA"
+    TAG_NAME_ALPHA = "${params.chartVersion}-ALPHA"
+    TAG_NAME_PRO = "${params.chartVersion}"
   }
 
   stages {
-
-    stage("Initial") {
+    stage('Initial') {
+      when {
+        expression {
+          params.buildType != 'initial'
+        }
+      }
       steps {
         script {
-          if (params.releaseTag) {
-            withEnv(["chartVersion=${params.chartVersion}-${env.currentBuild}"]) {
-              echo "Release tag: ${params.releaseTag}"
-              echo "Chart version: ${env.chartVersion}"
+          currentBuild.displayName = "${params.chartVersion}-${env.BUILD_NUMBER}"
+        }
+      }
+    }
+
+    stage('Build Alpha') {
+      when {
+        expression {
+          buildType == 'ALPHA'
+        }
+      }
+      stages {
+        stage('Preparing') {
+          steps {
+            script {
+              currentBuild.displayName = "${currentBuild.displayName} : ALPHA"
+            }
+          }
+        }
+
+        stage('Checkout') {
+          steps {
+            script {
+              try {
+                echo 'Checkout - Starting.'
+                gitCheckoutProcess("${env.GIT_BRANCH_NAME}") // FIXME จะต้อง checkout จาก PRE_ALPHA
+                echo 'Checkout - Completed.'
+              } catch (err) {
+                echo 'Checkout - Failed.'
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        stage("Replacement") {
+          steps {
+            script {
+              try {
+                echo "Replace - Starting."
+                sh "sudo mkdir -p ${env.HELM_CHART_DIR}/assets"
+
+                replaceTemplate("Chart.yaml", "${env.HELM_CHART_DIR}/Chart.yaml", ["{{CHART_VERSION}}": "${env.CHART_VERSION}"])
+                replaceTemplate("values.yaml", "${env.HELM_CHART_DIR}/values/values-dev.yaml", ["{{IMAGE_REPO}}": "${env.IMAGE_REPO_ALPHA}"])
+                replaceTemplate("deployment.yaml", "${env.HELM_CHART_DIR}/templates/deployment.yaml", ["{{IMAGE_REPO}}": "${env.imageRepoDev}"])
+
+                sh "sudo cp ${env.HELM_TEMPLATE_DIR}/service.yaml ${env.HELM_CHART_DIR}/templates"
+                echo "Replace - Completed."
+              } catch(err) {
+                echo "Replace - Failed."
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        stage("Package") {
+          steps {
+            script {
+              try {
+                echo "Package - Starting."
+                packageProcess()
+                echo "Package - Completed."
+              } catch (err) {
+                echo "Package - Failed."
+                currentBuild.result = 'FAILURE'
+                error('Package stage failed.')
+              }
+            }
+          }
+        }
+
+        stage('Commit and Push') {
+          steps {
+            script {
+              try {
+                echo 'GIT Commit - Starting.'
+                gitCommitPushProcess()
+                echo 'GIT Commit - Completed.'
+              } catch (err) {
+                echo 'GIT Commit - Failed.'
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        stage('Remove tag') {
+          steps {
+            script {
+              echo 'Remove tag - Starting.'
+              gitRemoveTagProcess("${env.TAG_NAME_ALPHA}")
+              echo 'Remove tag - Completed.'
+            }
+          }
+        }
+
+        stage('Push tag') {
+          steps {
+            script {
+              try {
+                echo 'Push tag - Starting.'
+                gitPushTagProcess("${env.TAG_NAME_ALPHA}")
+                echo 'Push tag - Completed.'
+              } catch (err) {
+                echo 'Push tag - Failed.'
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        // เพิ่ม stage เรียก Job ของ PNG-IAPI_WEB
+        // stage('Call PNG-IAPI_WEB') {
+        //
+        // }
+      }
+    }
+
+    stage('Build Tag') {
+      when {
+        expression {
+          params.buildType == 'RELEASE TAG'// && params.chartVersion == env.tagVersion
+        }
+      }
+      stages {
+        stage('Preparing') {
+          steps {
+            script {
+              currentBuild.displayName = "${currentBuild.displayName} : TAG 🏷️"
+            }
+          }
+        }
+
+        stage('Checkout') {
+          steps {
+            script {
+              try {
+                echo 'Checkout - Starting.'
+                gitCheckoutProcess("refs/tags/${env.TAG_NAME_ALPHA}")
+                echo 'Checkout - Completed.'
+              } catch (err) {
+                echo 'Checkout - Failed.'
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        stage('Remove ALPHA from index') {
+          steps {
+            script {
+              try {
+                echo "Remove ALPHA from index - Starting."
+
+                def yaml = readYaml file: "${env.HELM_CHART_DIR}/index.yaml"
+                def chartEntries = yaml.entries["${env.CHART_NAME}"]
+
+                int index = 0
+                while (index < chartEntries.size()) {
+                  if (chartEntries[index]['version'].contains('ALPHA')) {
+                    yaml.entries["${env.CHART_NAME}"].remove(index)
+                  } else {
+                    index++
+                  }
+                }
+
+                writeYaml file: "${env.HELM_CHART_DIR}/index.yaml", data: yaml, overwrite: true
+                echo "Remove ALPHA from index - Completed."
+              } catch(err) {
+                echo "Remove ALPHA from index - Failed."
+                currentBuild.result = 'FAILURE'
+                error(err)
+              }
+            }
+          }
+        }
+
+        stage('Remove ALPHA from assets') {
+          steps {
+            script {
+              try {
+                echo "Remove ALPHA from assets - Starting."
+                sh "rm -f ${env.HELM_CHART_DIR}/assets/*-ALPHA.tgz"
+                echo "Remove ALPHA from assets - Completed."
+              } catch(err) {
+                echo "Remove ALPHA from assets - Failed."
+                currentBuild.result = 'FAILURE'
+                error(err)
+              }
+            }
+          }
+        }
+
+        stage('Replacement') {
+          steps {
+            script {
+              try {
+                echo "Replace - Starting."
+                replaceTemplate("Chart.yaml", "${env.HELM_CHART_DIR}/Chart.yaml", ["{{CHART_VERSION}}": "${params.chartVersion}"])
+                replaceTemplate("values.yaml", "${env.HELM_CHART_DIR}/values/values-pre.yaml", ["{{IMAGE_REPO}}": "${env.IMAGE_REPO_PRE}"])
+                replaceTemplate("values.yaml", "${env.HELM_CHART_DIR}/values/values-pro.yaml", ["{{IMAGE_REPO}}": "${env.IMAGE_REPO_PRO}"])
+                replaceTemplate("deployment.yaml", "${env.HELM_CHART_DIR}/templates/deployment.yaml", ["{{IMAGE_REPO}}": "{{.Values.image.repository}}"])
+                echo "Replace - Completed."
+              } catch(err) {
+                echo "Replace - Failed."
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        stage("Package") {
+          steps {
+            script {
+              try {
+                echo "Package - Starting."
+                packageProcess()
+                echo "Package - Completed."
+              } catch (err) {
+                echo "Package - Failed."
+                currentBuild.result = 'FAILURE'
+                error('Package stage failed.')
+              }
+            }
+          }
+        }
+
+        stage('Commit and Push') {
+          steps {
+            script {
+              try {
+                echo 'GIT Commit - Starting.'
+                gitCommitPushProcess()
+                echo 'GIT Commit - Completed.'
+              } catch (err) {
+                echo 'GIT Commit - Failed.'
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+        }
+
+        stage('Push tag') {
+          steps {
+            script {
+              try {
+                echo 'Push tag - Starting.'
+                gitPushTagProcess("${env.TAG_NAME_PRO}")
+                echo 'Push tag - Completed.'
+              } catch (err) {
+                echo 'Push tag - Failed.'
+                currentBuild.result = 'FAILURE'
+                error(err.message)
+              }
+            }
+          }
+
+          post {
+            success {
+              script {
+                if (currentBuild.result == "SUCCESS") {
+                  gitRemoveTagProcess("${env.TAG_NAME_PRE_ALPHA}")
+                  gitRemoveTagProcess("${env.TAG_NAME_ALPHA}")
+                }
+              }
             }
           }
         }
       }
     }
-
-    stage("Checkout") {
-      steps {
-        script {
-          try {
-            echo "Checkout - Starting."
-            cleanWs()
-            checkout([$class: 'GitSCM', branches: [[name: "${env.gitBranch}"]], extensions: [], userRemoteConfigs: [[credentialsId: "${env.gitCredentialId}", url: "${env.gitRepoUrl}"]]])
-            echo "Checkout - Completed."
-          } catch (err) {
-            echo "Checkout - Failed."
-            currentBuild.result = 'FAILURE'
-            error('Checkout stage failed.')
-          }
-        }
-      }
-    }
-
-    stage("Replace") {
-      steps {
-        script {
-          try {
-            echo "Replace - Starting."
-            sh "sudo mkdir -p ${env.helmChartDir}/assets"
-            replaceChart()
-            replaceValue()
-            replaceDeployment()
-            sh "sudo cp ${env.helmTemplateDir}/service.yaml ${env.helmChartDir}/templates"
-            sh "sudo ls -al ${env.helmChartDir}"
-            echo "Replace - Completed."
-          } catch(err) {
-            echo "Replace - Failed."
-            currentBuild.result = 'FAILURE'
-            error('Package stage failed.')
-          }
-        }
-      }
-    }
-
-    stage("Package") {
-      steps {
-        script {
-          try {
-            echo "Package - Starting."
-            sh """
-              sudo mkdir -p ${env.helmChartDir}/assets
-              sudo helm package ${env.helmChartDir} -d ${env.helmChartDir}/temp
-              sudo helm repo index --url assets --merge ${env.helmChartDir}/index.yaml ${env.helmChartDir}/temp
-              ls ${env.helmChartDir}/temp
-              sudo mv ${env.helmChartDir}/temp/${env.chartName}-*.tgz ${env.helmChartDir}/assets
-              sudo mv ${env.helmChartDir}/temp/index.yaml ${env.helmChartDir}/
-              sudo rm -rf ${env.helmChartDir}/temp
-            """
-            echo "Package - Completed."
-          } catch (err) {
-            echo "Package - Failed."
-            currentBuild.result = 'FAILURE'
-            error('Package stage failed.')
-          }
-        }
-      }
-    }
-
-    stage("Git commit and push") {
-      steps {
-        script {
-          try {
-            sh """
-              git config --global user.name 'Jenkins Pipeline'
-              git config --global user.email 'jenkins@localhost'
-              git checkout -b ${env.gitBranch}
-              git add .
-              git commit -m 'Update from Jenkins-Pipeline'
-            """
-            withCredentials([gitUsernamePassword(credentialsId: "${env.gitCredentialId}", gitToolName: 'Default')]) {
-              sh "git push origin ${env.gitBranch}"
-            }
-          } catch(err) {
-            echo "GIT - Failed."
-            currentBuild.result = 'FAILURE'
-            error('Git stage failed.')
-          }
-        }
-      }
-    }
-/*
-    stage("Helm install") {
-      steps {
-        script {
-          try {
-            sleep 60
-            sh "sudo helm repo add ${env.chartRepoName} ${env.chartRepoUrl}"
-            helmUpgrade()
-          } catch (err) {
-            retry(2) {
-              sleep 60
-              helmUpgrade()
-            }
-          }
-        }
-      }
-    }
-*/
   }
 }
