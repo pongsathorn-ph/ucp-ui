@@ -3,12 +3,12 @@ entries:
   ucp-ui-chart:
   - apiVersion: v2
     appVersion: 0.0.1
-    created: "2024-02-28T09:29:26.616215904Z"
+    created: "2024-02-28T09:30:07.819583762Z"
     description: A Helm chart for Kubernetes
-    digest: d5f880306a2f53524484b8d25112af2c0328a2b83ffde74717732e2fcb3300aa
+    digest: e1e11ecdb284988439284abe20d7d28ad7352a8411cfd6094ae5dce90e293dfb
     name: ucp-ui-chart
     type: application
     urls:
-    - assets/ucp-ui-chart-2024.02.00-0002-ALPHA.tgz
-    version: 2024.02.00-0002-ALPHA
-generated: "2024-02-28T09:29:26.615864245Z"
+    - assets/ucp-ui-chart-2024.02.00.tgz
+    version: 2024.02.00
+generated: "2024-02-28T09:30:07.818925386Z"
