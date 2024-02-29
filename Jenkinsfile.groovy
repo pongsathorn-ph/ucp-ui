@@ -213,9 +213,22 @@ pipeline {
         }
 
         // เพิ่ม stage เรียก Job ของ PNG-IAPI_WEB
-        // stage('Call PNG-IAPI_WEB') {
-        //
-        // }
+        stage('Call PNG-IAPI_WEB') {
+          steps {
+            script {
+                def jobParams = [
+                    string(name: 'appName', value: "png-iapi-ucp"),
+                    string(name: 'namespace', value: "png-iapi-namespace"),
+                    string(name: 'chartName', value: "ucp"),
+                    string(name: 'chartVersion', value: "${params.chartVersion}"),
+                    string(name: 'buildType', value: "${params.buildType}"),
+                    string(name: 'uiDependencyVersion', value: "${env.CHART_VERSION}")
+                ]
+
+                build job: 'PNG-IAPI/PNG-IAPI_WEB', parameters: jobParams
+            }
+          }
+        }
       }
     }
 
